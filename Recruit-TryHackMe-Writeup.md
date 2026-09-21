@@ -12,6 +12,9 @@ Started with rustscan since it's faster than a full nmap sweep on a fresh box:
 rustscan -b 500 -a 10.114.146.247 --top -- -sCV -Pn
 ```
 
+![rustscan output](images/01-rustscan-1.png)
+![rustscan output continued](images/02-rustscan-2.png)
+
 Two ports came back:
 
 | Port | Service | Version |
@@ -29,6 +32,8 @@ Threw feroxbuster at it with the standard dirbuster medium list:
 feroxbuster -u http://10.114.146.247 -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
 ```
 
+![feroxbuster output](images/03-feroxbuster.png)
+
 Three things stood out from the noise:
 
 - `/mail/mail.log` — a mail log, just sitting there, readable
@@ -37,7 +42,11 @@ Three things stood out from the noise:
 
 ## The log file gives away the game
 
-`/mail/mail.log` turned out to be an actual email thread between HR and IT, discussing the portal rollout. One line in particular:
+`/mail/mail.log` turned out to be an actual email thread between HR and IT, discussing the portal rollout.
+
+![mail.log contents](images/04-maillog.png)
+
+One line in particular:
 
 > HR login credentials (username: `hr`) are currently stored in the application configuration file (`config.php`) for ease of access during the initial rollout phase.
 
@@ -58,21 +67,25 @@ A parameter that takes an arbitrary URL and fetches it is basically begging for 
 curl "http://10.114.146.247/file.php?cv=file:///var/www/html/config.php"
 ```
 
-That returned the raw PHP source, HR password included. Paired with the username from the mail log, I had working credentials for the login page.
+![config.php source via LFI](images/05-config-php.png)
+
+That returned the raw PHP source, HR password included (redacted above). Paired with the username from the mail log, I had working credentials for the login page.
 
 ## Flag 1 — logging in as HR
 
 Logged in, landed on `dashboard.php`, and there it was — a candidate table plus an HR flag sitting in a banner:
 
-```
-[REDACTED]
-```
+![HR dashboard with flag](images/06-hr-dashboard-flag.png)
 
 ## The search box is the real way in
 
 The dashboard has a candidate search field. Threw a stray `'` at it (`search=123'`) and got a SQL error back — classic sign the input isn't sanitized.
 
-Grabbed the request in Burp, saved it to `request.txt`, and let sqlmap do the rest:
+Grabbed the request in Burp, saved it to `request.txt`:
+
+![Burp SQLi request](images/07-burp-sqli.png)
+
+Let sqlmap do the rest:
 
 ```
 sqlmap -r request.txt -dbs
@@ -103,15 +116,9 @@ And dumped `users`:
 sqlmap -r request.txt -D recruit_db -T users --dump
 ```
 
-```
-+----+----------+----------+
-| id | password | username |
-+----+----------+----------+
-| 1  | [REDACTED] | admin  |
-+----+----------+----------+
-```
+![sqlmap dump of users table](images/08-sqlmap-dump.png)
 
-Admin credentials, straight out of the database.
+Admin credentials, straight out of the database (password redacted above).
 
 ## Flag 2 — admin login
 
