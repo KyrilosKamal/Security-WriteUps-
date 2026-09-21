@@ -12,8 +12,8 @@ Started with rustscan since it's faster than a full nmap sweep on a fresh box:
 rustscan -b 500 -a 10.114.146.247 --top -- -sCV -Pn
 ```
 
-![rustscan output](images/01-rustscan-1.png)
-![rustscan output continued](images/02-rustscan-2.png)
+![rustscan output](https://i.postimg.cc/vZJvD5nP/01-rustscan-1.png)
+![rustscan output continued](https://i.postimg.cc/MpCYX1B9/02-rustscan-2.png)
 
 Two ports came back:
 
@@ -32,7 +32,7 @@ Threw feroxbuster at it with the standard dirbuster medium list:
 feroxbuster -u http://10.114.146.247 -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
 ```
 
-![feroxbuster output](images/03-feroxbuster.png)
+![feroxbuster output](https://i.postimg.cc/rwB9z54Y/03-feroxbuster.png)
 
 Three things stood out from the noise:
 
@@ -44,7 +44,7 @@ Three things stood out from the noise:
 
 `/mail/mail.log` turned out to be an actual email thread between HR and IT, discussing the portal rollout.
 
-![mail.log contents](images/04-maillog.png)
+![mail.log contents](https://i.postimg.cc/XYRgX95L/04-maillog.png)
 
 One line in particular:
 
@@ -67,7 +67,7 @@ A parameter that takes an arbitrary URL and fetches it is basically begging for 
 curl "http://10.114.146.247/file.php?cv=file:///var/www/html/config.php"
 ```
 
-![config.php source via LFI](images/05-config-php.png)
+![config.php source via LFI](https://i.postimg.cc/rwB9z54b/05-config-php.png)
 
 That returned the raw PHP source, HR password included (redacted above). Paired with the username from the mail log, I had working credentials for the login page.
 
@@ -75,7 +75,7 @@ That returned the raw PHP source, HR password included (redacted above). Paired 
 
 Logged in, landed on `dashboard.php`, and there it was — a candidate table plus an HR flag sitting in a banner:
 
-![HR dashboard with flag](images/06-hr-dashboard-flag.png)
+![HR dashboard with flag](https://i.postimg.cc/4xD1npcq/06-hr-dashboard-flag.png)
 
 ## The search box is the real way in
 
@@ -83,7 +83,7 @@ The dashboard has a candidate search field. Threw a stray `'` at it (`search=123
 
 Grabbed the request in Burp, saved it to `request.txt`:
 
-![Burp SQLi request](images/07-burp-sqli.png)
+![Burp SQLi request](https://i.postimg.cc/t4Kz7F6L/07-burp-sqli.png)
 
 Let sqlmap do the rest:
 
@@ -116,7 +116,7 @@ And dumped `users`:
 sqlmap -r request.txt -D recruit_db -T users --dump
 ```
 
-![sqlmap dump of users table](images/08-sqlmap-dump.png)
+![sqlmap dump of users table](https://i.postimg.cc/t4Kz7FPj/08-sqlmap-dump.png)
 
 Admin credentials, straight out of the database (password redacted above).
 
