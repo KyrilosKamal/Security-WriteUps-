@@ -1,6 +1,6 @@
 # Recruit (TryHackMe)
 
-**Target:** `10.114.146.247`
+**Target:** `Recruit`
 
 Recruit is a hiring-portal box. Nothing exotic here — an exposed log file leaks a hint, a bad file-fetch feature turns into LFI, and the admin panel falls to a SQLi that sqlmap chews through in under a minute. Below is how I actually got through it.
 
