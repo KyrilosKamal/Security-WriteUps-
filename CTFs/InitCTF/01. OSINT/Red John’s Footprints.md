@@ -1,0 +1,19 @@
+# Red John's Footprints
+
+**Category:** OSINT · **Points:** 100 · **Challenge ID:** 1
+
+**Brief:** Letter from "Red John" gives handle `rEdJ0Hn203`. Hint: "I never stop **pushing** my work out there."
+
+**Steps:**
+
+1. "Pushing" + handle → GitHub. Profile: `https://github.com/rEdJ0Hn203`.
+2. One repo: `rEdJ0Hn`. `rEdJ0Hn.md` has taunt + Medium link: `https://medium.com/@harshagarwal200617/the-man-who-drank-tea-and-forgot-to-be-angry-b8e7d4ad4844`
+3. Note says truth near word **teacup**. Medium article has decoy flags (`init{n1c3_try_p4tr1ck}`, `init{y0u_f0und_m3_t00_34rly}`, `CTD{...}`, `init{...}`, `HII{...}`). Tea recipe ingredient line holds real flag:
+
+   ```
+   1 teacup of water: InIt{th3_truth_w4s_1n_th3_w4t3r}
+   ```
+
+**Flag:** `InIt{th3_truth_w4s_1n_th3_w4t3r}`
+
+**Takeaway:** Username → profile → repo → linked article. Ignore flags not in `InIt{...}` format. Decoys built to look plausible.
