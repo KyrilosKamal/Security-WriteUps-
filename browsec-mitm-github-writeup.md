@@ -1,243 +1,141 @@
-# How a VPN Extension Hijacked My GitHub Session (and How I Caught It)
+# Investigation: Unexpected Third-Party Asset Requests on GitHub
 
-_A real-world browser extension MITM attack, caught live through DevTools._
+**Type:** Browser-side troubleshooting / security investigation  
+**Status:** Cause not conclusively attributed  
+**Scope:** The author's own browser session and observations described below
 
----
+> **Important:** This report documents unexpected requests to `infird.com` while loading GitHub. The available evidence does **not** establish that Browsec caused the requests, that TLS was intercepted, that malicious JavaScript executed, or that a GitHub session was compromised. Those remain hypotheses unless supported by reproducible tests and preserved artifacts.
 
-## Background
+## Summary
 
-So there I was, just checking my GitHub dashboard like any other day. You know the drill coffee in hand, scrolling through notifications, feeling productive. 
+While browsing GitHub, parts of the interface failed to load. DevTools showed CSS and JavaScript asset requests to `infird.com`, rather than the expected GitHub asset host. The browser reported cross-origin loading errors and JavaScript chunk-load failures.
 
-Except something felt... off.
+This is anomalous and warrants investigation. A third-party hostname appearing in a resource URL is evidence of an unexpected resource reference; by itself, it does not identify which component introduced that reference or prove malicious behavior.
 
-The page loaded, sort of. The feed showed up, but the left sidebar? Just spinning. And spinning. I clicked around, nothing worked. The whole thing was frozen solid.
+## Observed symptoms
 
-My first thought? "Ugh, GitHub's probably having issues again" or maybe my internet's acting up. 
+The reported symptoms were:
 
----
+- GitHub dashboard content loaded incompletely.
+- The left-side repository area remained blank or displayed a spinner.
+- Some controls and navigation did not work.
+- DevTools showed requests for CSS and JavaScript resources hosted at `infird.com`.
+- The browser reported CORS-related failures and webpack chunk-load errors.
+- Some requests reportedly returned HTTP 404.
 
-## The Symptom
+Example console output captured during the incident:
 
-Here's what I was dealing with:
-
-- GitHub dashboard loaded but **that sidebar spinner just wouldn't quit**
-- Left column (where my repos should've been) — completely blank
-- Feed showed some stuff, but not all of it
-- Nothing worked — buttons, links, navigation, all dead
-- No error messages, no GitHub status alerts, nothing
-
-And honestly? That's the scary part. This wasn't some obvious "YOUR COMPUTER HAS BEEN LOCKED" ransomware nonsense. It just looked like a broken webpage. The kind of thing that makes you hit F5 and move on.
-
----
-
-## DevTools Investigation
-
-Instead of refreshing like a normal person, I hit F12 and opened DevTools. The Console tab immediately told me this wasn't a "normal" problem.
-
-First thing that jumped out:
-
-```
-Access to CSS stylesheet at 'https://infird.com/cdn/primer-react-css.d18392e72f73b5a6.module.css'
-from origin 'https://github.com' has been blocked by CORS policy:
-No 'Access-Control-Allow-Origin' header is present on the requested resource.
+```text
+Access to CSS stylesheet at
+https://infird.com/cdn/primer-react-css.d18392e72f73b5a6.module.css
+from origin https://github.com has been blocked by CORS policy.
 ```
 
-Wait, what? **`infird.com`**? GitHub's never used that domain. Ever.
+A failed cross-origin stylesheet or script request explains why dependent UI components may fail to render. It does not, on its own, prove that an attacker attempted to inject code.
 
-GitHub serves all its stuff from `github.githubassets.com`. That's it. Any other domain is immediately suspicious.
+## What the evidence establishes
 
-And it wasn't just one error. My console was getting absolutely spammed. Hundreds of errors, all the same story — every single JavaScript chunk and CSS file GitHub needed was being requested from `infird.com` instead of the real CDN:
+| Observation | What it supports | What it does not establish |
+|---|---|---|
+| Resource URL uses `infird.com` | The page or browser attempted to load a resource from that host | Which extension, script, proxy, cache, or page component introduced the URL |
+| CORS error | The browser blocked a cross-origin response under the applicable resource-loading rules | That CORS prevented all possible malicious activity or that an attack was underway |
+| Chunk-load error | A required frontend chunk failed to load | The cause of the failed request |
+| HTTP 404 | The responding server indicated that the requested resource was not found | That the server was attacker-controlled or that an attack was operational |
+| GitHub UI partially failed | Some frontend resources or dependencies did not load successfully | That credentials, cookies, or tokens were accessed |
 
-```
-Access to script at 'https://infird.com/cdn/chunk-63160-d2b6073aa911a9ad.js'
-from origin 'https://github.com' has been blocked by CORS policy:
-No 'Access-Control-Allow-Origin' header is present on the requested resource.
+CORS is not a general-purpose defense against all script injection. Browser behavior depends on the resource type, request mode, response headers, and applicable content-security policy.
 
-Access to script at 'https://infird.com/cdn/primer-react-1cbafc24ef5f5e7d.js'
-from origin 'https://github.com' has been blocked by CORS policy:
-No 'Access-Control-Allow-Origin' header is present on the requested resource.
-```
+## Hypotheses to test
 
-After trying and failing multiple times, GitHub's webpack bundler finally gave up and threw fatal errors:
+Possible explanations include:
 
-```
-css loading:30 Uncaught (in promise) Error: Loading chunk 90225 failed after 3 retries.
-    at t.onerror.t.onload (css loading:30:14)
+1. A browser extension modified or redirected resource URLs.
+2. A local proxy, VPN client, DNS/security product, or filtering component affected requests.
+3. A cached or injected page resource referenced an unexpected host.
+4. A transient network, CDN, or browser-state issue caused the unexpected behavior.
 
-jsonp_chunk_loading:28 Uncaught (in promise) ChunkLoadError: Loading chunk 51591 failed after 3 retries.
-    at b.f.j (jsonp_chunk_loading:28:16)
-```
+Browsec was installed at the time and was therefore one component worth testing. Its presence is not proof of attribution.
 
-At this point, the page was basically dead. React can't do its thing without those chunks, so the UI just froze completely.
+## Reproduction and evidence collection
 
-Oh, and one more interesting line:
+The following checks would help establish causality. Record browser version, extension IDs and versions, timestamps, and the exact URL/request details. Redact cookies, authorization headers, tokens, and personal data before sharing HAR files.
 
-```
-Tracking Prevention blocked an XHR request to
-https://www.google-analytics.com/mp/collect?measurement_id=G-03XW3FWG7L
-```
+### 1. Preserve browser evidence
 
-This wasn't directly related to the attack, but it confirmed something important: whatever was running in my browser was intercepting **everything** — even analytics requests.
+- Save a HAR file with request and response headers where possible.
+- Save relevant DevTools Console and Network screenshots.
+- Record the initiator shown for each unexpected request.
+- Record DNS resolution and remote IP information with timestamps.
+- Preserve the extension ID, version, manifest, and installed-source details.
 
----
+### 2. Compare controlled browser states
 
-## Attack Mechanism
+Repeat the same GitHub page load under controlled conditions:
 
-### How the Hijack Works
+1. Existing browser profile with extensions enabled.
+2. Same profile with Browsec disabled.
+3. Same profile after Browsec is removed.
+4. A clean browser profile with no extensions.
+5. If possible, a second browser or device on the same network.
 
-So here's the thing about **Browsec** (and honestly, most VPN extensions): they're not just "privacy tools." They're full-blown browser-level proxies. 
+Keep the URL, network, browser version, and test timing as consistent as possible. If the unexpected requests disappear only when one extension is disabled, repeat the test to rule out coincidence and inspect the request initiator and extension behavior.
 
-Think about it — they intercept ALL your HTTP/HTTPS traffic **after** TLS termination. That means they can see everything in plaintext, because they're running inside your browser itself. It's the same level of access as running Burp Suite as a proxy or having a corporate firewall inspecting your SSL traffic.
+### 3. Inspect the extension
 
-In this case, Browsec (or a compromised version of it) was rewriting GitHub's CDN URLs on the fly. Instead of fetching from `github.githubassets.com`, my browser was being told to fetch from `infird.com`. The attacker's server was supposed to serve modified versions of these JS/CSS chunks — with malicious code injected into GitHub's React frontend.
+Inspect the installed extension's actual manifest and code for relevant permissions, content scripts, declarative network rules, proxy settings, and update provenance. Permissions such as `webRequest`, `scripting`, or host access indicate capabilities; they do not prove that a particular request was modified.
 
-### Technical Evidence Against Browsec
+### 4. Inspect the network path
 
-Independent security analysis from CRXaminer (a browser extension security scanner) rated Browsec VPN as **HIGH RISK**, which perfectly explains the mechanics of this attack:
+Check browser proxy settings, VPN state, DNS answers, local filtering software, and any system-level proxy configuration. Compare DNS and connection details across the controlled tests.
 
-1. **Excessive Permissions:**
-   - `webRequest` + `webRequestAuthProvider` = can intercept and modify ALL web requests.
-   - `scripting` + `<all_urls>` = can inject code into any webpage.
-   - `content_scripts` running at `document_start` = executes before the page even loads.
+## Impact assessment
 
-2. **Suspicious CSP Policy:**
-   Browsec's manifest allows `connect-src` to over 100 suspicious HTTP domains, including:
-   - `trafcfy.com` (classified as a "rogue website" by Avast)
-   - `fastcache.xyz`, `cdnboost.me`, `datafrenzy.org`
-   - Multiple generic CDN-sounding domains that look like drop-zones for injected payloads.
+A malicious extension or other component with sufficient access could potentially alter page behavior or access data available to its execution context. However, this investigation has not documented evidence that:
 
-3. **Unencrypted HTTP Traffic:**
-   Symantec security research confirmed that Browsec sends telemetry data over plain HTTP, making it vulnerable to MITM attacks. The manifest's allowance for HTTP connections to multiple third-party servers completely undermines the expectation that a VPN tool would always encrypt traffic.
+- A malicious script from `infird.com` successfully executed in the GitHub origin.
+- GitHub session cookies or authentication tokens were read or transmitted.
+- Credentials or private repository data were exfiltrated.
+- Browsec was the component that changed the asset URLs.
 
-This technical evidence strongly supports the conclusion that Browsec was the exact attack vector for the `infird.com` injection attempt.
+Do not describe these impacts as confirmed without request-level, extension-level, or endpoint evidence.
 
-### Why CORS Saved Me (Accidentally)
+## Precautionary response
 
-Here's where the attackers messed up: `infird.com` wasn't configured with proper CORS headers.
+The following actions were reported as having been taken:
 
-When GitHub's frontend tried to load resources from `infird.com`, my browser enforced CORS policy and blocked execution. This was an operational mistake on their part. If `infird.com` had just responded with `Access-Control-Allow-Origin: https://github.com`, the injected scripts would have executed silently. No console errors. No broken UI. I'd have been completely compromised without knowing it.
+- Removed the Browsec extension.
+- Changed the GitHub password.
+- Revoked active personal access tokens.
+- Reviewed authorized OAuth applications.
+- Reviewed GitHub security activity.
+- Added `infird.com` to a DNS blocklist.
 
-### The Retry Pattern & Partial Infrastructure
+These are precautionary containment steps. They do not demonstrate that credentials or tokens were compromised. If repeating this response, preserve relevant evidence before clearing browser state where practical, and verify account activity through GitHub's security settings.
 
-One interesting detail: GitHub's webpack bundler doesn't give up easily. It tries to load each chunk up to 3 times. Toward the end of the retry sequence, some requests started returning `404` instead of just `ERR_FAILED`. 
+## Detection notes
 
-A `404` means the domain resolved, the TCP connection was established, and the server actually responded — it just didn't have those specific files. In other words: **the attack infrastructure was real and operational**, but it only had a subset of GitHub's chunks mirrored. 
+When investigating unexpected third-party asset requests:
 
----
+- Inspect the request's **Initiator** and call stack in DevTools.
+- Compare the requested URL with the site's documented or observed asset hosts.
+- Capture response status, headers, remote address, and timing.
+- Check extension activity and proxy configuration.
+- Reproduce with extensions disabled and in a clean profile.
+- Treat CORS and chunk-load errors as symptoms to investigate, not proof of an attack.
 
-## Why This Attack Class Is Dangerous
+## Conclusion
 
-### What Could Have Happened
+The incident involved unexpected requests to `infird.com` and failures loading parts of GitHub's frontend. This is a valid security anomaly and a useful starting point for browser-extension and supply-chain investigation.
 
-If `infird.com` had been properly configured, the injected JavaScript would've had access to:
-
-- **Session cookies** and CSRF tokens
-- **API responses** — private repo names, SSH keys, email addresses
-- **Form submissions** — including 2FA codes and password change forms
-- **Full DOM manipulation** — silently adding SSH keys, creating webhooks, authorizing OAuth apps
-
-And here's the kicker: **all of this would've happened while GitHub looked and worked completely normally**. No weird popups, no obvious signs of compromise. Just business as usual — while everything I did was being monitored and modified.
-
-### Silent Failure by Design
-
-This is the most terrifying part: if the attack had succeeded, I would've seen **zero indication** anything was wrong. The frozen page I experienced? That was the attack **failing noisily**. A successful version would be completely invisible.
-
----
-
-## Section 5 — Incident Response
-
-Once I identified `infird.com` as the injecting domain and Browsec as the culprit, I moved fast:
-
-**1. Remove the extension**
-Not disable — **hard remove**. Browsec got deleted from my browser immediately.
-
-**2. Rotate GitHub password**
-Changed it right away. I assumed my session might've been compromised before CORS blocked the attack. Better safe than sorry.
-
-**3. Revoke all Personal Access Tokens**
-Nuked every single active token. Any token that was visible to page-level JS during an active session could've been exfiltrated.
-
-**4. Audit OAuth Applications**
-Went through and revoked anything I didn't recognize or actively use.
-
-**5. Review Security Log**
-Filtered for `token`, `session`, `oauth` events. Looking for access from unexpected IPs or user agents. (Thankfully, didn't find anything suspicious.)
-
-**6. Block `infird.com` at DNS level**
-Added it to my AdGuard DNS blocklist. This prevents the domain from resolving anywhere on my network.
-
----
-
-## Detection Methods
-
-If you want to catch this type of attack, here's what to look for:
-
-### 1. DevTools Console — CORS Violations
-Any `Access-Control-Allow-Origin` error referencing an unexpected CDN domain is a massive red flag. GitHub loads assets from `github.githubassets.com` **only**.
-
-### 2. ChunkLoadError Cascade
-A single `ChunkLoadError`? Network glitch. Multiple simultaneous failures across dozens of chunks? Systematic failure. Someone's intercepting your traffic.
-
-### 3. 404 on Foreign Domain
-The clearest confirmation that active attack infrastructure exists. If you see a 404 from a domain that shouldn't be serving your assets, investigate immediately.
-
-### 4. Network Tab — Domain Filtering
-Filter by domain. Any domain serving JS or CSS outside of the official list (`github.com`, `github.githubassets.com`, etc.) is a red flag.
-
-### 5. DNS Query Logs
-If you're running AdGuard DNS or Pi-hole, check your query logs. The hijack generates **hundreds** of DNS queries for the malicious domain that should never appear in normal traffic.
-
----
-
-## Lessons
-
-**VPN extensions are MITM proxies, not privacy tools.**
-Any extension with `<all_urls>` permission has the same level of access as a network appliance. Treat it accordingly — or don't install it at all.
-
-**Broken UI is not always a bug.**
-When a page doesn't load properly, **open DevTools first**. The Console and Network tabs will show you exactly what's happening. This whole investigation took me under 60 seconds once I opened DevTools.
-
-**CORS is not a security control.**
-It only stopped this attack because the attackers misconfigured their server. Don't rely on CORS failures to detect injection attempts.
-
-**Supply chain risk is real for extensions.**
-A legitimate extension can be acquired, compromised via update, or have a malicious component silently pushed. Audit your extensions regularly.
-
-**Rotate first, investigate second.**
-When you suspect an active compromise, revoke credentials **before** you fully understand the attack. You can always reissue tokens; you can't un-exfiltrate data.
-
----
-
-A broken GitHub page led me to uncover an active browser-level injection attempt. The attack failed because of an operational mistake on the attackers' part — not because of any built-in defense. 
-
-The real lesson isn't that we're safe. It's that we got lucky. Next time, we might not see the console errors at all.
-
----
-
-*Found this useful? Share it with your team. Browser extension attacks are seriously underreported and underestimated.*
-
-*P.S. After removing Browsec, GitHub loads noticeably faster. Just saying. 😉*
-
-*Tags: #CyberSecurity #MITM #BrowserSecurity #PenetrationTesting #AppSec #GitHub #InfoSec*
-
----
+**The root cause remains unconfirmed in the evidence currently documented.** A defensible attribution to Browsec would require a repeatable controlled test or direct evidence connecting the extension to the URL modification. A claim of session theft would require separate evidence of credential or token access and exfiltration.
 
 ## References
 
-| # | Source | Type | Direct Link |
-|---|--------|------|-------------|
-| 1 | Malwarebytes | Threat Intelligence | [Help with the infird.com Trojan](https://forums.malwarebytes.com/topic/323866-help-with-the-infirdcom-trojan/) |
-| 2 | cside.com (Simon Wijckmans) | Security Research | [How web extensions can hurt your site (INFIRC.com and INFIRD.com)](https://cside.com/blog/how-web-extensions-can-hurt-your-site-infirc-and-infird) |
-| 3 | Greatis Software | Malware Database | [Remove INFIRD.COM virus (Removal Guide)](https://greatis.com/unhackme/help/remove/remove-infird-com-virus.htm) |
-| 4 | Cyclonis | Threat Database | [Infird.com: What Is This Pop-Up Menace?](https://www.cyclonis.com/remove-infird-com/) |
-| 5 | VirusTotal | Malware Analysis | [infird.com Domain Analysis](https://www.virustotal.com/gui/domain/infird.com) |
-| 6 | AlienVault OTX (LevelBlue) | Threat Intelligence | [infird.com Threat Indicator](https://otx.alienvault.com/indicator/domain/infird.com) |
-| 7 | Darktrace / Cyberhaven | Security Report | [Cyberhaven Supply Chain Attack: Exploiting Browser Extensions](https://www.darktrace.com/blog/cyberhaven-supply-chain-attack-exploiting-browser-extensions) |
-| 8 | The Hacker News | Fake Extensions Farm | [Over 100 malicious Chrome extensions slipped through Google's radar](https://thehackernews.com/2025/02/over-100-malicious-chrome-extensions.html) |
-| 9 | GitLab Security | 100+ Fake Extensions | [Malicious browser extensions impacting at least 3.2 million users](https://gitlab-com.gitlab.io/gl-security/security-tech-notes/threat-intelligence-tech-notes/malicious-browser-extensions-feb-2025/) |
-| 10 | Georgia Tech Research | Privacy Research | [Study Finds Thousands of Browser Extensions Compromise User Data](https://research.gatech.edu/study-finds-thousands-browser-extensions-compromise-user-data) |
-| 11 | GitHub Gist (Th3w33knd) | Adware Detection | [FileCR.com is forcing a malicious extension (CRXLauncher)](https://gist.github.com/Th3w33knd/06b15b0df1b08ab371c392cc75be4f53) |
-| 12 | CRXPlorer | Extension Scanner | [Free Chrome Extension Security Scanner & CRX Viewer](https://crxplorer.com/) |
-| 13 | vpnMentor | VPN Reviews | [Browsec Review 2026 - Security & Privacy Analysis](https://www.vpnmentor.com/reviews/browsec/) |
-| 14 | Joe Sandbox | Malware Analysis | [Automated Malware Analysis Report for infird.com](https://www.joesandbox.com/analysis/1904974/0/html) |
-| 15 | Security.com (Symantec) | Technical Analysis | [Chrome Extension Leaks User Data Over Unencrypted HTTP](https://www.security.com/threat-intelligence/chrome-extension-leaks) |
+These references provide background and investigation leads; they do not independently prove what happened in this browser session.
+
+- [cside: How web extensions can hurt your site (INFIRC.com and INFIRD.com)](https://cside.com/blog/how-web-extensions-can-hurt-your-site-infirc-and-infird)
+- [Malwarebytes forum: Help with the infird.com Trojan](https://forums.malwarebytes.com/topic/323866-help-with-the-infirdcom-trojan/)
+- [VirusTotal: infird.com domain analysis](https://www.virustotal.com/gui/domain/infird.com)
+- [AlienVault OTX: infird.com](https://otx.alienvault.com/indicator/domain/infird.com)
+- [Chrome Extensions documentation](https://developer.chrome.com/docs/extensions/)
+- [MDN: Cross-Origin Resource Sharing (CORS)](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS)
