@@ -14,10 +14,11 @@ A technical portfolio documenting hands-on security labs, CTF challenges, and se
 | [TryHackMe](#tryhackme) | Room walkthroughs, enumeration, exploitation, and technical analysis |
 | [InitCTF](#initctf) | Challenge writeups across OSINT, cryptography, forensics, miscellaneous, and web |
 | [Security investigations](#security-investigations) | Investigation notes based on observed behavior and collected evidence |
+| [Writeup template](Templates/Writeup-Template.md) | Consistent structure for future technical reports |
 
 ## TryHackMe
 
-- **[Brr](Brr-Writeup-room)** — ICS/OT lab involving ScadaBR, a JSP upload path, Docker network discovery, and Modbus TCP register reads.
+- **[Brr](Brr-Writeup-room.md)** — ICS/OT lab involving ScadaBR, JSP upload execution, Docker network discovery, and Modbus TCP register reads.
 - **[Recruit](Recruit-TryHackMe-Writeup.md)** — Web application lab covering exposed information, server-side file retrieval, and SQL injection.
 
 ## InitCTF
@@ -34,18 +35,9 @@ Topics include geolocation and metadata analysis, cryptography, disk and network
 
 - **[Browsec / unexpected GitHub asset requests](browsec-mitm-github-writeup.md)** — Investigation of unexpected third-party asset requests observed while using GitHub. The report separates browser observations from hypotheses; attribution to a specific extension and a confirmed session compromise are not established by the currently documented evidence.
 
-## Methodology and evidence
+## Documentation standards
 
-Where possible, writeups include:
-
-1. Scope and lab context.
-2. Enumeration and attack-surface discovery.
-3. Evidence supporting each finding.
-4. Validation and impact.
-5. Attack-chain summary.
-6. Lessons learned and defensive recommendations.
-
-Commands and screenshots are included as learning evidence. Challenge environments and software versions may change, so results should be independently validated.
+New writeups should use the [writeup template](Templates/Writeup-Template.md). Prioritize reproducible evidence, explain why each test was selected, distinguish observations from hypotheses, state limitations, and provide actionable remediation.
 
 ## Responsible use
 
