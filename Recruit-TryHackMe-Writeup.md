@@ -1,163 +1,190 @@
-# Recruit (TryHackMe)
+# Recruit — TryHackMe Writeup
 
-`Web` `LFI` `SQL Injection` `Information Disclosure` `Easy`
+`Web` `Information Disclosure` `Server-Side File Read` `SQL Injection` `Easy`
 
-**Target:** `Recruit`
+**Platform:** TryHackMe  
+**Room:** Recruit  
+**Target:** `<TARGET_IP>` (replace with the room's current target IP)
 
-Recruit bills itself as a recruitment portal, and functionally it is one — candidates, statuses, an HR view, an admin view. But almost every corner of it leaks something it shouldn't. A log file tells you where the password lives. A "fetch a CV" feature turns into arbitrary file read. And the search box just... trusts you. I didn't need anything clever here, just patience to follow one leak into the next.
+> This walkthrough documents an authorized TryHackMe lab. Replace expired target details and verify commands against the current room instance before reuse. Credentials and flags are intentionally redacted.
 
-## Port scan
+## Overview
 
-Rustscan first, because waiting on a full nmap sweep before I even know what's open feels like a waste of a coffee break:
+The room demonstrates how multiple web weaknesses can be chained:
 
+1. Enumerate exposed web resources.
+2. Read an exposed mail log that discloses an HR username and points to an application configuration file.
+3. Abuse a URL-fetching endpoint to read a local server file.
+4. Use the recovered HR credentials to access the application.
+5. Identify and exploit SQL injection in a dashboard search function.
+6. Access the administrative account using credentials exposed by the database.
+
+The important lesson is the relationship between information disclosure, server-side file retrieval, and SQL injection. Each finding provides context for the next step.
+
+## 1. Port scanning
+
+```bash
+rustscan -b 500 -a <TARGET_IP> --top -- -sCV -Pn
 ```
-rustscan -b 500 -a 10.114.146.247 --top -- -sCV -Pn
-```
 
-![rustscan output](https://i.postimg.cc/vZJvD5nP/01-rustscan-1.png)
-![rustscan output continued](https://i.postimg.cc/MpCYX1B9/02-rustscan-2.png)
-
-Two ports, nothing surprising:
+The original lab run identified:
 
 | Port | Service | Version |
-|------|---------|---------|
-| 53/tcp | domain | ISC BIND 9.16.1 (Ubuntu) |
-| 80/tcp | http | Apache httpd 2.4.41 (Ubuntu) |
+|---|---|---|
+| 53/tcp | DNS | ISC BIND 9.16.1 (Ubuntu) |
+| 80/tcp | HTTP | Apache httpd 2.4.41 (Ubuntu) |
 
-DNS wasn't going to give me anything useful on a box like this, so port 80 was the entire attack surface.
+These are observations from the recorded room instance, not a guarantee that a new instance will expose identical versions or ports.
 
-## Digging through the web root
+## 2. Web content discovery
 
-Feroxbuster with the standard dirbuster medium wordlist:
-
-```
-feroxbuster -u http://10.114.146.247 -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
-```
-
-![feroxbuster output](https://i.postimg.cc/rwB9z54Y/03-feroxbuster.png)
-
-Buried in the usual pile of assets and locale folders, three things actually mattered:
-
-- `/mail/mail.log` — a mail log. Just sitting there. Publicly readable.
-- `/api.php` — documentation for some internal API
-- `/phpmyadmin/` — a DB admin panel I never ended up needing, but nice to know it's there
-
-## The log file gives away the game
-
-`/mail/mail.log` turned out to be a real internal email thread between HR and IT about the portal's rollout.
-
-![mail.log contents](https://i.postimg.cc/XYRgX95L/04-maillog.png)
-
-One line does all the work here:
-
-> HR login credentials (username: `hr`) are currently stored in the application configuration file (`config.php`) for ease of access during the initial rollout phase.
-
-"For ease of access during the initial rollout phase" is doing a lot of heavy lifting in that sentence. Now I had a username and I knew exactly which file to go read. I just needed a way to read it.
-
-## api.php points at the bug
-
-`/api.php` documents a CV-fetching feature:
-
-> **How can I fetch a candidate CV using the API?**
-> `/file.php?cv=<URL>`
-
-A parameter that takes an arbitrary URL and fetches it is basically an invitation. My guess for the backend is something like `file_get_contents($_GET['cv'])` or `fopen()` fed the raw request straight — PHP's stream wrappers (`file://`, `http://`, `php://`, and friends) are all enabled by default unless someone explicitly locks them down, and nothing here checks the scheme or restricts it to `http(s)://`. So instead of a CV URL, I can hand it a local path with `file://` and let the server read its own disk back to me.
-
-## Reading config.php
-
-```
-curl "http://10.114.146.247/file.php?cv=file:///var/www/html/config.php"
+```bash
+feroxbuster -u http://<TARGET_IP> \
+  -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
 ```
 
-![config.php source via LFI](https://i.postimg.cc/rwB9z54b/05-config-php.png)
+The scan identified several relevant paths:
 
-Straight to the raw PHP source, HR password and all (redacted above). Combined with the username from the mail log, that's a working login.
+- `/mail/mail.log`
+- `/api.php`
+- `/phpmyadmin/`
 
-## Flag 1 — logging in as HR
+The exposed mail log contained an internal message identifying the HR username and indicating that the corresponding password was stored in `config.php`.
 
-Logged in, landed on `dashboard.php`. Candidate table, and sitting right in a banner above it, the flag:
+**Finding:** Public access to internal mail logs can disclose operational details and help an attacker target other weaknesses.
 
-![HR dashboard with flag](https://i.postimg.cc/4xD1npcq/06-hr-dashboard-flag.png)
+## 3. Analyze the API documentation
 
-Nice — but the more interesting thing on this page wasn't the flag. It was the search box underneath it.
+The observed `/api.php` documentation described a CV-fetching endpoint:
 
-## The search box is the real way in
-
-Threw a stray `'` at it (`search=123'`) and got a SQL error back. That's the tell: a broken quote in user input reaching a database error means the query is being built by concatenating the raw parameter straight into the SQL string — something like `SELECT * FROM candidates WHERE name LIKE '%$search%'` — instead of using a parameterized query. The unclosed quote breaks the syntax, and the fact that MySQL's error makes it back into the response confirms both the injection point and that error output isn't being suppressed here.
-
-Grabbed the request in Burp and saved it to `request.txt`:
-
-![Burp SQLi request](https://i.postimg.cc/t4Kz7F6L/07-burp-sqli.png)
-
-From there I let sqlmap do the actual work:
-
-```
-sqlmap -r request.txt -dbs
+```text
+/file.php?cv=<URL>
 ```
 
-It confirmed boolean-based blind and UNION-based injection, 4 columns, MySQL on the back end. sqlmap gets to that column count with an `ORDER BY` probe — bump `ORDER BY N` until the query errors, and whatever N you land on is how many columns the original `SELECT` returns. Four lines up neatly with the four fields the candidates table actually shows (ID, Name, Position, Status), which is also why a `UNION SELECT` payload comes back clean instead of erroring on a mismatch. Database list:
+This suggests a server-side URL-fetching feature. The behavior should be tested carefully to determine whether the application restricts schemes, hosts, paths, and redirects.
 
-```
-information_schema, mysql, performance_schema, phpmyadmin, recruit_db, sys
+The original lab test supplied a local file URL. The result demonstrated that the endpoint could retrieve a local server-side file in this challenge environment.
+
+This is more precisely described as **arbitrary local file read through an unsafe server-side URL-fetching feature**. Calling it conventional path-based LFI may be imprecise because the input is a URL and the server-side fetch implementation is not shown.
+
+## 4. Read the application configuration
+
+In the authorized room instance, the following request returned the PHP configuration source:
+
+```bash
+curl "http://<TARGET_IP>/file.php?cv=file:///var/www/html/config.php"
 ```
 
-`recruit_db` was obviously the one worth looking at:
+The response exposed the HR password in the lab. The value is redacted from this public writeup.
 
+The request demonstrates the impact of allowing an untrusted URL-fetch parameter to access local file resources. The exact backend function (for example, `file_get_contents`) should not be asserted without source-code evidence.
+
+## 5. HR application access
+
+Using the username disclosed in the mail log and the password recovered from the configuration file, the HR account could access the dashboard.
+
+**Flag 1:** `[REDACTED]`
+
+The dashboard also contained a search function. This became the next attack surface.
+
+## 6. SQL injection discovery
+
+A quote character in the search parameter caused a database error in the observed lab response. This was an initial indication that user input might be affecting a SQL query.
+
+A database error alone is not sufficient to prove SQL injection. The finding was subsequently tested with sqlmap using a request captured in Burp Suite.
+
+```bash
+sqlmap -r request.txt --dbs
 ```
+
+The recorded run reported boolean-based blind and UNION-based SQL injection against a MySQL backend, with a four-column query context.
+
+The number of columns should be treated as a tool-validated result for this specific request. Do not infer it solely from the number of visible table fields.
+
+### Enumerate the database
+
+```bash
 sqlmap -r request.txt -D recruit_db --tables
 ```
 
-```
-+------------+
-| candidates |
-| users      |
-+------------+
+The recorded output listed:
+
+```text
+candidates
+users
 ```
 
-`users` is never subtle about what it wants you to do next.
+### Extract the users table
 
-```
+```bash
 sqlmap -r request.txt -D recruit_db -T users --dump
 ```
 
-![sqlmap dump of users table](https://i.postimg.cc/t4Kz7FPj/08-sqlmap-dump.png)
+The lab database dump exposed administrative credentials. Password material is redacted.
 
-Admin credentials, straight out of the database, password redacted above.
+## 7. Administrative access
 
-## Flag 2 — admin login
+The recovered administrative credentials were used to access the application's admin area.
 
-Logged out of the HR session, logged back in as admin. Second flag showed up right away:
+**Flag 2:** `[REDACTED]`
 
+## Attack-chain summary
+
+```text
+Web enumeration
+    |
+    +--> Public mail log
+    |       |
+    |       +--> HR username and config-file disclosure hint
+    |
+    +--> API documentation
+            |
+            +--> URL-fetch endpoint
+                    |
+                    +--> Local config file read
+                            |
+                            +--> HR credentials
+                                    |
+                                    +--> HR dashboard
+                                            |
+                                            +--> SQL injection
+                                                    |
+                                                    +--> Database credentials
+                                                            |
+                                                            +--> Admin access
 ```
-[REDACTED]
-```
 
-## How it all chains together
+## Findings and remediation
 
-1. Recon finds HTTP on port 80
-2. Directory brute-force finds `mail.log` and `api.php`
-3. `mail.log` leaks the HR username and points at `config.php` for the password
-4. `api.php` documents `file.php?cv=<URL>`, an unsanitized file-fetch endpoint
-5. `file://` wrapper on `file.php` reads `config.php` directly → HR password
-6. HR login → **Flag 1**
-7. The dashboard search field is SQLi-vulnerable → sqlmap dumps `users` → admin credentials
-8. Admin login → **Flag 2**
+| Finding | Impact | Recommended remediation |
+|---|---|---|
+| Publicly accessible mail log | Internal information disclosure | Store logs outside the web root; deny public access; remove sensitive data from logs |
+| Unsafe server-side URL fetch | Local file disclosure and potentially broader server-side request risks | Allowlist required destinations and schemes; block local/private addresses and redirects; enforce strict path and protocol validation |
+| Plaintext application credential in configuration | Credential disclosure if the file is exposed | Use a secrets manager or protected environment configuration; rotate exposed credentials; apply least privilege |
+| SQL injection in search parameter | Unauthorized database access and possible credential disclosure | Use parameterized queries; avoid dynamic SQL concatenation; restrict database account privileges; avoid exposing database errors |
+| Weak or exposed administrative credentials | Unauthorized administrative access | Use unique strong credentials, secure password hashing, MFA where available, and credential rotation |
 
-## Flags
+Severity depends on exploitability, exposure, and business impact in the real deployment. The table describes the lab findings and does not represent a formal CVSS assessment.
 
-| Flag | Value |
-|------|-------|
-| User | `[REDACTED]` |
-| Admin | `[REDACTED]` |
+## Lessons learned
 
-## What's actually broken here
+- Directory and content discovery can reveal sensitive files and useful application documentation.
+- Internal logs can disclose usernames, architecture, and operational details.
+- A server-side URL-fetching feature must be treated as a security-sensitive input.
+- Validate suspected SQL injection with reproducible request/response evidence.
+- Chaining vulnerabilities can have a much greater impact than assessing each weakness in isolation.
 
-| Severity | Issue |
-|----------|-------|
-| **Medium** | `mail.log` publicly reachable — leaks internal comms and a credential-storage hint |
-| **High** | `file.php` trusts user-supplied URLs; `file://` wrapper allows arbitrary local file read (LFI) |
-| **Medium** | HR password stored in plaintext in `config.php` |
-| **Critical** | `search` parameter on `dashboard.php` is SQL-injectable (boolean-blind + UNION-based) — full DB read |
-| **High** | Admin password is weak/guessable once the DB is dumped |
+## Evidence to retain
 
-None of these are individually exotic. What makes the box work is that they chain: the log tells you where to look, the LFI gets you there, and the SQLi finishes the job. Fix any one link and the rest of the chain stops mattering.
+For a reproducible portfolio report, include sanitized copies of:
+
+- Port-scan output.
+- Feroxbuster findings.
+- Relevant mail-log excerpt.
+- API documentation response.
+- File-fetch request and redacted response.
+- Burp request used for SQL injection testing.
+- Sqlmap output showing the confirmed injection technique and database.
+- Screenshots of the two lab flags with flag values redacted.
+
+Remove session cookies, passwords, tokens, and any personal information before publishing.
